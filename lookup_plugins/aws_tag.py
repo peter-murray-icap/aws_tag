@@ -483,6 +483,27 @@ class AWSResource(object):
             _d = None
         return _d
 
+    def instance_unpack_interfaces(self, data):
+
+        if data:
+            _d = {}
+            _d["is_truncated"] = data.is_truncated,
+            _d["key_marker"] = data.key_marker,
+            _d["marker"] = data.marker,
+            _d["markers"] = str(data.markers),
+            _d["networkInterfaceSet"] = data.networkInterfaceSet,
+            _d["next_generation_marker"] = data.next_generation_marker,
+            _d["next_key_marker"] = data.next_key_marker,
+            _d["next_marker"] = data.next_marker,
+            _d["next_token"] = data.next_token,
+            _d["next_upload_id_marker"] = data.next_upload_id_marker,
+            _d["next_version_id_marker"] = data.next_version_id_marker,
+            _d["status"] = data.status,
+            _d["version_id_marker"] = data.version_id_marker
+        else:
+            _d = None
+        return _d
+
     def instance_jsonattrs(self, data):
         # return the useful attributes from the response object.  if we're missing something you depend on
         # please open a feature request
@@ -490,13 +511,20 @@ class AWSResource(object):
         # todo: review which of these should/can have a default None. making a guess
         _d = {}
         _d["handle"] = data.__str__()
+        # TODO: ERROR HERE
+        #       fatal: [localhost] => A variable inserted a new parameter into the module args.
+        #       Be sure to quote variables if they contain equal signs (for example: "{{var}}").
         _d["block_device_mapping"] = self.instance_unpack_block_device(getattr(data, 'block_device_mapping', None))
         _d["dns_name"] = getattr(data, 'dns_name', None)
         _d["ebs_optimized"] = getattr(data, 'ebs_optimized', None)
         _d["id"] = data.id
         _d["image_id"] = data.image_id
         _d["instance_type"] = data.instance_type
-        _d["interfaces"] = str(data.interfaces.__dict__)  # let me know if you need this as a non-string
+
+        # TODO: ERROR HERE
+        #       fatal: [localhost] => A variable inserted a new parameter into the module args.
+        #       Be sure to quote variables if they contain equal signs (for example: "{{var}}").
+        _d["interfaces"] = self.instance_unpack_interfaces(data.interfaces)
         _d["ip_address"] = getattr(data, 'ip_address', None)
         _d["key_name"] = data.key_name
         _d["launch_time"] = data.launch_time
@@ -540,6 +568,7 @@ class AWSResource(object):
                 # in a list to reassign to the instance.
                 in_l = []
 
+                # result set is a list. i think this is more idiomatic than ...jsonattrs(instance['instances'][0])
                 for in_iter in instance['instances']:
                     # todo: wrap with try/except in case only one response is bad?
                     try:
@@ -550,14 +579,12 @@ class AWSResource(object):
 
                 instance['instances'] = in_l
 
-                # returning instances to the instance_list[n]['instance'] triggers
                 # fatal: [localhost] => A variable inserted a new parameter into the module args.
                 # number of args is the same -- we're swapping out <class 'boto.resultset.ResultSet'> for <type 'list'>
                 # https://github.com/ansible/ansible/blob/fb96173d10dc7e3ae21fb4ab608859c426e6f548/lib/ansible/runner/__init__.py#L995-L998
-                #instance.pop('instances')
 
                 self.warn(msg='This currently fails if you request results. '
-                              'Try deep access of an attribute beyond resp.results.n')
+                              'Try deep access of an attribute beyond resp.results.[n]')
 
             except TypeError:
                 self.warn(msg='TypeError when trying to unpack ec2 data.')
@@ -580,7 +607,6 @@ class AWSResource(object):
             i = self.aws_conn['ec2'].get_all_instances(filters=filter_dict)
         else:
             i = self.aws_conn['ec2'].get_all_instances()
-
 
         if bind:
             # list(result) to get the reservation ids instead of the class repr
