@@ -7,11 +7,18 @@ from ansible.module_utils import ec2
 # Licensed under the BSD 3-Clause License, see the LICENSE file for more details.
 # tristan fisher (github.com/tfishersp; github.com/tristanfisher)
 
+VERSION = '1.0'
+
 # Dev notes:
 # using an instance of basic.AnsibleModule as a "rolling parts car" for binding methods onto AWSResource
 # is more trouble then it's worth because of the interdependent nature of the AnsibleModule object.
 # - for consideration: a number of attributes come back as '\n                            ' consider stripping off.
 
+
+# TODO:
+# DRY up the 'if not filter dict' (maybe move this into the init so it's just there for access from methods?)
+# Refactor, dry up, allow resource item chaining -- VPC(Filter)->RouteTable(resultSet of VPC(Filter))
+# Look into how the attr access and object generation happens for vpc route.  i think that makes more sense
 
 DOC = """An Ansible lookup plugin for returning AWS resources based on tags.
 
@@ -87,6 +94,29 @@ This returns all matching VPC objects (e.g. vpc-xxxxxxx) in the us-east-1 region
 
 """
 
+WORKAROUNDS="""
+
+Issue: A variable inserted a new parameter into the module args. Be sure to quote variables...
+
+Solution: Replace the '=' in the output with some harmless variable:
+
+- name: Route tables - return route table
+  debug: var="{{ item }}"
+  with_aws_tag:
+    aws_resource: "routetable"
+    aws_filter_dict: {
+      "vpc_id": "vpc-xxxxxxx"
+    }
+  register: myroutingtable
+
+
+- debug: var="{{ item.item.id |replace("=", "QUACKQUACK") }}"
+  with_items:
+    - "{{ myroutingtable.results }}"
+
+
+"""
+
 # do all the imports and depedency injection in one shot.
 try:
     import boto
@@ -133,14 +163,17 @@ class AWSResource(object):
         self.aws_conn = {}
         self.api_response = {}
         self.api_response['ec2'] = {}
+        self.api_response['routetable'] = {}
         self.api_response['s3'] = {}
-        self.api_response['vpc'] = {}
-        self.api_response['subnet'] = {}
         self.api_response['sg'] = {}
+        self.api_response['subnet'] = {}
+        self.api_response['vpc'] = {}
 
         # -- property and iter+setattr attrs --#
 
         # to fit into the ansible style of lookup plugins, allow terms to come in as a list
+        # TODO: this whole thing is a mess once we take into account
+        # that we might want to allow for multiple filter lines
         if terms:
             _swap = {}
 
@@ -182,7 +215,7 @@ class AWSResource(object):
             setattr(self, k, v)
 
         # Check on none -- tags can be 0 or falsey
-        if self.aws_tag_value is None and self.aws_tag_dict is None:
+        if self.aws_tag_value is None and self.aws_tag_dict is None and self.aws_filter_dict is None:
             raise errors.AnsibleError(vague_tag_msg)
 
         # it should be safe to downcase '%' or '*' in unicode.  see case mapping:
@@ -214,6 +247,7 @@ class AWSResource(object):
 
         self.getter_table = {
             'ec2': self.ec2_get_instances,
+            'routetable': self.vpc_get_routetables,
             's3': None,
             'subnet': self.subnet_get_subnets,
             'subnets': self.subnet_get_subnets,
@@ -221,6 +255,12 @@ class AWSResource(object):
             'securitygroup': self.sg_get_sgs,
             'vpc': self.vpc_get_vpcs
         }
+
+        self.generate_filter_table = {
+            'tags': self.generate_tag_filter_from_attrs,
+            'filters': self.generate_filter_from_attrs
+        }
+        self.filters = []
 
         # bind a connection for our purpose on self
         self.bind_conn(self.aws_resource)
@@ -326,6 +366,18 @@ class AWSResource(object):
             self._aws_tag_value = val
 
     @property
+    def aws_filter_dict(self):
+        try:
+            return self._aws_filter_dict
+        except AttributeError:
+            return None
+
+    @aws_filter_dict.setter
+    def aws_filter_dict(self, val):
+        if val:
+            self._aws_filter_dict = val
+
+    @property
     def aws_tag_dict(self):
         try:
             return self._aws_tag_dict
@@ -396,11 +448,38 @@ class AWSResource(object):
                                                   aws_secret_access_key=self.params['aws_secret_access_key'])
         if resource == 'subnet':
             self.aws_conn['subnet'] = boto.connect_vpc(aws_access_key_id=self.params['aws_access_key_id'],
-                                                    aws_secret_access_key=self.params['aws_secret_access_key'])
+                                                       aws_secret_access_key=self.params['aws_secret_access_key'])
+
+        if resource == 'routetable':
+            self.aws_conn['routetable'] = boto.connect_vpc(aws_access_key_id=self.params['aws_access_key_id'],
+                                                           aws_secret_access_key=self.params['aws_secret_access_key'])
+
         if resource == 'vpc':
             #might need to get region here by calling get_region(params['region'], **kwargs)
             self.aws_conn['vpc'] = boto.connect_vpc(aws_access_key_id=self.params['aws_access_key_id'],
                                                     aws_secret_access_key=self.params['aws_secret_access_key'])
+        # give a default setting... only if we're not set to match_all (no point if *)
+
+
+
+    # TODO: use of generate_filter_from_attrs will mean having to search filter _and_ filter_dict for attrs
+    # with the merging of filter criteria before the get_all_RESOURCE(filter=filters_merged)
+
+    def generate_filter_from_attrs(self):
+        """ Handle filters that *are not* tags.
+
+        """
+        if self.aws_filter_dict:
+
+            if "association.main" in self.aws_filter_dict:
+                # https://github.com/boto/boto/issues/1742
+                if self.aws_filter_dict["association.main"] is True:
+                    self.aws_filter_dict["association.main"] = "true"
+
+            return self.aws_filter_dict
+            # not sure any transformation needs to happen
+            # for k,v in self.filter_dict.items():
+
 
     def generate_tag_filter_from_attrs(self):
 
@@ -416,7 +495,10 @@ class AWSResource(object):
 
         if self.aws_tag_dict:
 
-            for k,v in self.aws_tag_dict.items():
+            for k, v in self.aws_tag_dict.items():
+
+                # TODO: move these to filter_dict when ready so we can deprecate the old style
+
                 #todo: if you tag with vpc_id it will never be found. this may be a bad idea.
                 # maybe preface unfiltered keywords with some string or take in a different arg for merging
                 # e.g. aws_filters: {"vpc_id": "SOMETHING", "az": "SOMETHING ELSE"}
@@ -459,6 +541,36 @@ class AWSResource(object):
             _filter.update({_k: _v})
 
         return _filter
+
+    def merge_filters(self, filters=[]):
+        _ = {}
+        for filt in filters:
+            _.update(filt)
+        return _
+
+    def generate_filters(self, filters=['tags', 'filters']):
+        """
+        Generate the filters, implicitly from tag and filter dicts
+
+        :param filters: name of defined dictionary lookup function (e.g. {'tags': generate_tag_filter_from_attrs})
+        :return: flat list of dictionary filters [{}, {}]
+        """
+        _swap = []
+
+        # if generation returns anything, append to _swap
+        if 'tags' in filters:
+            _ = self.generate_filter_table['tags']()
+            if _:
+                _swap.append(_)
+
+        # generate_filter_from_attrs
+        if 'filters' in filters:
+            _ = _swap.append(self.generate_filter_table['filters']())
+            if _:
+                _swap.append(_)
+
+        return self.merge_filters(_swap)
+
 
     def instance_unpack_block_device(self, obj):
 
@@ -514,6 +626,7 @@ class AWSResource(object):
         # TODO: ERROR HERE
         #       fatal: [localhost] => A variable inserted a new parameter into the module args.
         #       Be sure to quote variables if they contain equal signs (for example: "{{var}}").
+        # TODO: when multi-block device, we need to [ device for device in getattr(data, 'block_device_mapping....
         _d["block_device_mapping"] = self.instance_unpack_block_device(getattr(data, 'block_device_mapping', None))
         _d["dns_name"] = getattr(data, 'dns_name', None)
         _d["ebs_optimized"] = getattr(data, 'ebs_optimized', None)
@@ -684,6 +797,68 @@ class AWSResource(object):
             self.api_response['subnet']['list'] = i
             # subnet unpacking can be currently done by vpc_unpack
             self.api_response['subnet']['unpacked'] = self.vpc_unpack(i)
+        else:
+            return i
+
+    def vpc_route_unpack(self, data):
+        """
+        process data from get_all_route_tables() -- potentially already filtered by tags or vpc ids
+        :param data: incoming [RouteTable:rtb-df5a61ba, RouteTable:rtb-16282573] objects
+        :return: processed data dictionaries in lists
+        """
+
+        _data = []
+
+        for route in data:
+
+            _swap = {}
+
+            try:
+
+                _swap['region'] = dict(region=getattr(route.region, "name", ""),
+                                       endpoint=getattr(route.region, "endpoint", ""))
+                _swap['id'] = route.id
+                #'item': u'\n        ',
+                #no _swap['item']
+                _swap['propagatingVgwSet'] = getattr(route, 'propagatingVgwSet', None)
+                _swap['routes'] = [ str(r) for r in getattr(route, 'routes', []) ]
+                _swap['tags'] = getattr(route, 'tags', {})
+                _swap['vpc_id'] = getattr(route, 'vpc_id', '')
+
+                ra_swap = getattr(data[0], 'associations', [])
+                if ra_swap:
+                    # I can't see anything I need in here as an actual item
+                    ra_swap = ''[str(ra_swap.__dict__)]
+
+                _swap['associations'] = ra_swap
+
+            except TypeError:
+                _swap['failed'] = 'True'
+
+            _data.append(_swap)
+
+        return _data
+
+    def vpc_get_routetables(self, filter_dict={}, bind=True):
+
+        # TODO: test out this new usage of the filter generation process
+
+        # give a default setting... only if we're not set to match_all (no point if *)
+        if not filter_dict and not self.match_all:
+            filter_dict = self.generate_filters()
+
+        if not self.match_all:
+            # todo: refactor aws_conn style so we can do chaining of filters
+            # (e.g. filter_vpc: dict/terms; filter_routetables: dict/terms; order: vpc->routetables
+            #i = self.aws_conn['vpc'].get_all_vpcs(filters=filter_dict)
+            # http://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeRouteTables.html
+            i = self.aws_conn['routetable'].get_all_route_tables(filters=filter_dict)
+        else:
+            i = self.aws_conn['routetable'].get_all_route_tables()
+
+        if bind:
+            self.api_response['routetable']['list'] = i
+            self.api_response['routetable']['unpacked'] = self.vpc_route_unpack(i)
         else:
             return i
 

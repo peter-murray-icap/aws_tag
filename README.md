@@ -1,11 +1,15 @@
 # aws_tag
 
+##### May 14th 2015 note: the name of this plugin is a misnomer.  It supports more than tags.
 
-An Ansible lookup plugin for based loosely around AWS tag lookups.
+An Ansible lookup plugin that supports returning assets either via tag or generic filter conditions.
 
 
 Supports:
+
     - ec2
+    - routetables
+    - s3
     - security groups
     - subnets
     - vpc
@@ -86,3 +90,15 @@ And this returns all running instances with the 'Name' tag of mgmt-elasticsearch
 	  register: resp
 
 which will return a relatively large payload: [gist](https://gist.github.com/tfishersp/17ce75695c9f2e493416)
+
+or if you're looking for a raw filter, specify aws_filter_dict with your key/value pairs:
+
+	- name: Route tables => return the main route table(s)
+	  debug: var="{{ item }}"
+	  with_aws_tag:
+	    aws_resource: "routetable"
+	    aws_filter_dict: {
+	      "vpc_id": "vpc-xxxxxx",
+	      "association.main": "true"
+	    }
+	  register: my_vpc_routetable
